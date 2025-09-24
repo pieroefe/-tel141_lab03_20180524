@@ -1,26 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
-OVS_BR_DEFAULT="br-int"
-IFACES_DEFAULT=("ens4")
-RESERVED_IFACES=("ens3")
 
-if [[ $EUID -ne 0 ]]; then echo "Ejecuta como root"; exit 1; fi
+# Uso:
+#   sudo ./init_worker.sh <nombre-ovs> <if1> [if2 ...]
+# Ejemplo:
+#   sudo ./init_worker.sh br-int ens4
 
-OVS_BR="${1:-$OVS_BR_DEFAULT}"
+OVS_BR="${1:-br-int}"
 shift || true
-IFACES=("${@:-${IFACES_DEFAULT[@]}}")
+IFACES=("$@")
+
+die(){ echo "[ERROR] $*" >&2; exit 1; }
+[[ ${#IFACES[@]} -eq 0 ]] && die "Debes indicar al menos 1 interfaz física."
 
 for i in "${IFACES[@]}"; do
-  [[ " ${RESERVED_IFACES[*]} " == *" $i "* ]] && { echo "Bloqueado: $i"; exit 1; }
+  [[ "$i" == "ens3" ]] && die "ens3 está prohibida por consigna."
+  ip link show "$i" >/dev/null 2>&1 || die "Interfaz $i no existe."
 done
 
-if ! ovs-vsctl br-exists "$OVS_BR"; then
-  ovs-vsctl add-br "$OVS_BR"
+# Si existe un Linux bridge homónimo, eliminarlo (best-effort)
+if ip link show "$OVS_BR" >/dev/null 2>&1; then
+  if command -v brctl >/dev/null 2>&1 && brctl show 2>/dev/null | grep -q "^$OVS_BR"; then
+    echo "[*] Eliminando Linux bridge conflictivo $OVS_BR"
+    ip link set dev "$OVS_BR" down || true
+    ip link del "$OVS_BR" || true
+  fi
 fi
+
+# Asegurar servicio de OVS (si aplica)
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable --now openvswitch-switch >/dev/null 2>&1 || true
+fi
+
+# Crear/asegurar OvS
+ovs-vsctl --may-exist add-br "$OVS_BR"
 ip link set dev "$OVS_BR" up
 
+# Conectar interfaces como TRUNK
 for i in "${IFACES[@]}"; do
+  echo "[*] Añadiendo $i a $OVS_BR (trunk)"
+  ip addr flush dev "$i" || true
   ip link set dev "$i" up
-  ovs-vsctl --may-exist add-port "$OVS_BR" "$i"
+  # Eliminar el puerto desde cualquier bridge si ya existiera (no abortar)
+  ovs-vsctl --if-exists del-port "$i" 2>/dev/null || true
+  ovs-vsctl add-port "$OVS_BR" "$i" -- set port "$i" vlan_mode=trunk
 done
-echo "[OK] Worker listo en $OVS_BR con ${IFACES[*]}"
+
+echo "[✓] Worker listo: $OVS_BR con puertos: ${IFACES[*]}"
