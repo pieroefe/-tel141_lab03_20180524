@@ -1,15 +1,17 @@
 #!/bin/bash
-# Inicializa el bridge en cada Worker
+set -e
+BRIDGE="br-int"
+UPLINK="ens4"
+VLANS="100,200,30"
 
-BRIDGE=${1:-br-int}
-UPLINK=${2:-ens4}
-
-# Crear bridge
+echo "[INFO] Creando bridge $BRIDGE..."
 sudo ovs-vsctl --may-exist add-br $BRIDGE
+sudo ip link set $BRIDGE up
 
-# Conectar la interfaz física como trunk con VLANs 100,200,300
+echo "[INFO] Configurando $UPLINK como trunk ($VLANS)..."
 sudo ovs-vsctl --may-exist add-port $BRIDGE $UPLINK
-sudo ovs-vsctl set port $UPLINK trunks=100,200,300
+sudo ovs-vsctl set Interface $UPLINK type=system
+sudo ovs-vsctl set Port $UPLINK trunks=$VLANS
+sudo ip link set $UPLINK up
 
-echo "[OK] $BRIDGE listo en $(hostname)"
-
+echo "[OK] Worker configurado con $BRIDGE y VLANs activas."
