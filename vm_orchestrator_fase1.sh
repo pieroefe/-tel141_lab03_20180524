@@ -1,4 +1,5 @@
 #!/bin/bash
+#Se toma la VLAN 30 para no generar conflicto al colocar 300 en el 3er octeto
 set -e
 W2="10.0.10.2"
 W3="10.0.10.3"
