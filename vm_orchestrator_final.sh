@@ -11,5 +11,5 @@ bash ./vm_orchestrator_fase1.sh
 bash ./vm_orchestrator_fase2.sh
 
 echo "----------------------------------------------------"
-echo "? Topología completa (Fase1 + Fase2) desplegada sin errores."
+echo "Topología completa (Fase1 + Fase2) desplegada sin errores."
 echo "----------------------------------------------------"
