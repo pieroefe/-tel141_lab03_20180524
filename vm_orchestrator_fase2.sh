@@ -28,5 +28,5 @@ ssh -o StrictHostKeyChecking=no ubuntu@"${OFS_IP}" \
   "sudo /home/ubuntu/init_ofs.sh ${OVS_OFS} ${OFS_PORTS} ${VLANS}"
 
 echo "----------------------------------------------------"
-echo "? Fase 2 completada exitosamente"
+echo "Fase 2 completada exitosamente"
 echo "----------------------------------------------------"
