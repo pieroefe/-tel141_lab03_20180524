@@ -11,7 +11,7 @@ OFS_IP="10.0.10.5"
 OVS_HN="br-int"
 UPLINK_HN="ens4"
 INET_IF="ens3"
-VLANS="100,200,300"
+VLANS="100,200,30"
 
 OVS_OFS="br-ofs"
 OFS_PORTS="ens4,ens5,ens6"
