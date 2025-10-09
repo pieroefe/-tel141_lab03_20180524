@@ -1,1 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRIDGE="${1:-br-int}"       # nombre del OvS (br-int)
+UPLINK="${2:-ens4}"         # interfaz física hacia OFS (trunk)
+VLANS="${3:-100,200,30}"    # VLANs en trunk (formato: 100,200,30)
+
+echo "[INFO] Creando bridge $BRIDGE..."
+sudo ovs-vsctl --may-exist add-br "$BRIDGE"
+sudo ip link set "$BRIDGE" up
+
+echo "[INFO] Configurando $UPLINK como trunk ($VLANS)..."
+sudo ip link set "$UPLINK" up
+sudo ovs-vsctl --may-exist add-port "$BRIDGE" "$UPLINK"
+sudo ovs-vsctl set Interface "$UPLINK" type=system
+sudo ovs-vsctl set Port "$UPLINK" trunks="$VLANS"
+
+# Modo bridge (sin controller): switching clásico.
+sudo ovs-vsctl set-fail-mode "$BRIDGE" standalone
+sudo ovs-ofctl del-flows "$BRIDGE" || true
+sudo ovs-ofctl add-flow "$BRIDGE" "actions=NORMAL"
+
+echo "[OK] Worker configurado: $BRIDGE con $UPLINK (trunk=$VLANS)."
+
+###############################################################################
+#               FIREWALL & NAT: salida a Internet para las VMs                #
+###############################################################################
+echo "[INFO] Configurando sysctl y NAT para salida a Internet..."
+
+# 0) Asegurar backend 'nft' (evita inconsistencias legacy/nft)
+if sudo iptables -V 2>&1 | grep -qi legacy; then
+  echo "[INFO] Cambiando iptables a backend nft..."
+  sudo update-alternatives --set iptables /usr/sbin/iptables-nft || true
+fi
+
+# 1) sysctl runtime (y persistente)
+sudo modprobe br_netfilter 2>/dev/null || true
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+
+# Solo escribimos claves por-interfaz si existen para no romper con 'set -e'
+maybe_sysctl() {
+  local key="$1" val="$2"
+  if [[ -e "/proc/sys/${key//./\/}" ]]; then
+    sudo sysctl -w "$key=$val"
+  fi
+}
+
+# 'all' y 'default'
+sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+sudo sysctl -w net.ipv4.conf.default.rp_filter=0
+sudo sysctl -w net.ipv4.conf.all.send_redirects=0
+sudo sysctl -w net.ipv4.conf.default.send_redirects=0
+
+# Por interfaz (si existen ya)
+for IFACE in ens3 "$BRIDGE" gw100_int gw200_int gw30_int; do
+  maybe_sysctl "net.ipv4.conf.${IFACE}.rp_filter" 0
+  maybe_sysctl "net.ipv4.conf.${IFACE}.send_redirects" 0
+done
+
+# Persistente (no falla si ya existe). Incluye mínimos seguros.
+sudo tee /etc/sysctl.d/99-headnode.conf >/dev/null <<'EOF'
+net.ipv4.ip_forward=1
+net.bridge.bridge-nf-call-iptables=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+EOF
+sudo sysctl --system >/dev/null 2>&1 || true
+
+# 2) Detectar uplink a Internet (fallback a ens3 por si no hay ruta aún)
+INET_IF="$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true)"
+INET_IF="${INET_IF:-ens3}"
+echo "[INFO] Uplink a Internet detectado: $INET_IF"
+
+# 3) NAT + reglas FORWARD (idempotentes)
+# NAT para todas las subredes 192.168.X.Y (las de las VMs)
+if ! sudo iptables -t nat -C POSTROUTING -s 192.168.0.0/16 -o "$INET_IF" -j MASQUERADE 2>/dev/null; then
+  sudo iptables -t nat -A POSTROUTING -s 192.168.0.0/16 -o "$INET_IF" -j MASQUERADE
+fi
+
+# Tráfico de br-int hacia Internet y retorno
+if ! sudo iptables -C FORWARD -i "$BRIDGE" -o "$INET_IF" -j ACCEPT 2>/dev/null; then
+  sudo iptables -A FORWARD -i "$BRIDGE" -o "$INET_IF" -j ACCEPT
+fi
+if ! sudo iptables -C FORWARD -i "$INET_IF" -o "$BRIDGE" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+  sudo iptables -A FORWARD -i "$INET_IF" -o "$BRIDGE" -m state --state ESTABLISHED,RELATED -j ACCEPT
+fi
+
+# Tráfico desde las gateways VLAN (si existen) y retorno
+for V in 100 200 30; do
+  GW="gw${V}_int"
+  if ! sudo iptables -C FORWARD -i "$GW" -o "$INET_IF" -j ACCEPT 2>/dev/null; then
+    sudo iptables -A FORWARD -i "$GW" -o "$INET_IF" -j ACCEPT
+  fi
+  if ! sudo iptables -C FORWARD -i "$INET_IF" -o "$GW" -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+    sudo iptables -A FORWARD -i "$INET_IF" -o "$GW" -m state --state ESTABLISHED,RELATED -j ACCEPT
+  fi
+done
+
+echo "[OK] NAT y reglas de FORWARD aplicadas (iptables-nft)."
 
